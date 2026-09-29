@@ -387,6 +387,243 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(res["tree"]["initial"], "S1")
 
 
+class TestMultiCommonReceiptAssociation(unittest.TestCase):
+    """多路共同回执后，候选初态与当前位置的关联绝不能错位。
+
+    场景（五候选 A-E，中继 X/Y/Z/U/V，命令 a/b/c/z）：
+    * b：A、B、C 同一回执 r，分别进入 Y、X、Z；D、E 立即各得不同回执 d/e。
+    * a：A、B、C 同一回执 r，分别进入 X、Y、Z；D、E 同一回执 s 进入 U、V，
+      此后还需额外两步（z 同回执 w 带到 X/Y，再 z 得 x/y）才能分开。
+    * z：在 X/Y/Z 上回 x/y/z，唯一能一步分辨 {A,B,C} 的命令。
+    * c：A、B、C 汇流到同一位置（重新混淆），不可取。
+
+    最短最坏两步首命令唯一为 b；其共同回执分支必须是
+    {A→Y, B→X, C→Z}，后续 z 的 y 定 A、x 定 B、z 定 C。
+    """
+
+    def scenario(self, states=None, commands=None, candidates=None):
+        def cell(n, r):
+            return {"next": n, "response": r}
+
+        relay = {
+            "X": {"a": ("X", "r"), "b": ("X", "r"), "c": ("X", "r"),
+                  "z": ("X", "x")},
+            "Y": {"a": ("Y", "r"), "b": ("Y", "r"), "c": ("Y", "r"),
+                  "z": ("Y", "y")},
+            "Z": {"a": ("Z", "r"), "b": ("Z", "r"), "c": ("Z", "r"),
+                  "z": ("Z", "z")},
+            # D、E 经 a 进入 U、V：z 只给同一回执 w 并带到 X、Y，需再发一次 z。
+            "U": {"a": ("U", "g"), "b": ("U", "g"), "c": ("U", "g"),
+                  "z": ("X", "w")},
+            "V": {"a": ("V", "g"), "b": ("V", "g"), "c": ("V", "g"),
+                  "z": ("Y", "w")},
+        }
+        transitions = {
+            "A": {"a": ("X", "r"), "b": ("Y", "r"), "c": ("A", "p"),
+                  "z": ("A", "p")},
+            "B": {"a": ("Y", "r"), "b": ("X", "r"), "c": ("A", "p"),
+                  "z": ("B", "p")},
+            "C": {"a": ("Z", "r"), "b": ("Z", "r"), "c": ("A", "p"),
+                  "z": ("C", "p")},
+            "D": {"a": ("U", "s"), "b": ("D", "d"), "c": ("D", "t"),
+                  "z": ("D", "t")},
+            "E": {"a": ("V", "s"), "b": ("E", "e"), "c": ("E", "t"),
+                  "z": ("E", "t")},
+            **relay,
+        }
+        payload = {
+            "states": states or ["A", "B", "C", "D", "E",
+                                 "X", "Y", "Z", "U", "V"],
+            "commands": commands or ["a", "b", "c", "z"],
+            "candidates": candidates or ["A", "B", "C", "D", "E"],
+            "transitions": {
+                s: {c: {"next": n, "response": r} for c, (n, r) in row.items()}
+                for s, row in transitions.items()
+            },
+        }
+        return payload
+
+    def analyze(self, **kw):
+        return analyze_payload(self.scenario(**kw))
+
+    def test_canonical_first_command_and_worst_case(self):
+        res = self.analyze()
+        self.assertEqual(res["status"], "distinguishable")
+        self.assertEqual(res["worst_case_depth"], 2)
+        root = res["tree"]
+        self.assertEqual(root["type"], "command")
+        # a 最坏 3 步（D/E 需额外两步），c 不可辨，z 最坏 3 步，只有 b 为 2。
+        self.assertEqual(root["command"], "b")
+
+    def test_b_common_receipt_branch_keeps_correct_association(self):
+        root = self.analyze()["tree"]
+        # 响应分支按 ASCII 序：d、e、r。
+        self.assertEqual([b["response"] for b in root["branches"]],
+                         ["d", "e", "r"])
+        by_resp = {b["response"]: b for b in root["branches"]}
+
+        # D、E 立即由各自回执唯一确定。
+        self.assertEqual(by_resp["d"]["node"]["initial"], "D")
+        self.assertEqual(by_resp["e"]["node"]["initial"], "E")
+
+        shared = by_resp["r"]
+        # 关键回归：共同回执分支内必须是 A→Y、B→X、C→Z（不是 A→X、B→Y）。
+        self.assertEqual(
+            sorted(tuple(p) for p in shared["pairs"]),
+            [("A", "Y"), ("B", "X"), ("C", "Z")],
+        )
+        inner = shared["node"]
+        self.assertEqual(inner["type"], "command")
+        self.assertEqual(inner["command"], "z")
+        # 后续 z 回执归属：y 定 A、x 定 B、z 定 C，顺序按回执 ASCII。
+        self.assertEqual(
+            [(x["response"], x["node"]["initial"]) for x in inner["branches"]],
+            [("x", "B"), ("y", "A"), ("z", "C")],
+        )
+        # 每个叶子的信念关联也必须连续一致。
+        expected_pairs = {"x": [["B", "X"]], "y": [["A", "Y"]],
+                          "z": [["C", "Z"]]}
+        for x in inner["branches"]:
+            self.assertEqual(x["pairs"], expected_pairs[x["response"]])
+            self.assertEqual(x["node"]["pairs"], expected_pairs[x["response"]])
+
+    def test_a_path_needs_two_extra_steps_for_d_e(self):
+        # a 的 D/E 共同回执进入 U、V：z 给同一回执 w（位置 X/Y），再 z 才分辨，
+        # 因此 a 的最坏步数为 3，这正是规范首命令选 b 的原因。
+        res = self.analyze()
+        beliefs = {tuple(tuple(p) for p in b["pairs"]): b for b in res["beliefs"]}
+        uv = beliefs[(("D", "U"), ("E", "V"))]
+        xy = beliefs[(("D", "X"), ("E", "Y"))]
+        self.assertFalse(uv["terminal"])
+        self.assertEqual(uv["depth"], 2)
+        self.assertEqual(xy["depth"], 1)
+        # a 下的 ABC 关联与 b 下的互为镜像，二者都是独立信念、深度均为 1。
+        a_abc = beliefs[(("A", "X"), ("B", "Y"), ("C", "Z"))]
+        b_abc = beliefs[(("A", "Y"), ("B", "X"), ("C", "Z"))]
+        self.assertNotEqual(a_abc["id"], b_abc["id"])
+        self.assertEqual(a_abc["depth"], 1)
+        self.assertEqual(b_abc["depth"], 1)
+
+    def test_stable_across_input_permutations(self):
+        import json
+
+        def canonical(**kw):
+            return json.dumps(self.analyze(**kw)["tree"],
+                              ensure_ascii=False, sort_keys=True)
+
+        baseline = canonical()
+        # 命令以各种乱序录入。
+        for cmds in [["z", "c", "b", "a"], ["b", "a", "z", "c"],
+                     ["c", "z", "a", "b"]]:
+            self.assertEqual(canonical(commands=cmds), baseline)
+        # 状态、候选初态乱序（服务端会规范化，但树与归属必须完全一致）。
+        self.assertEqual(
+            canonical(
+                states=["V", "E", "Z", "D", "Y", "C", "X", "B", "U", "A"],
+                candidates=["E", "A", "D", "C", "B"],
+            ),
+            baseline,
+        )
+
+
+def _replay_tree(spec, result):
+    """逐分支按“父信念 + 命令 + 回执”连续复算渲染树。
+
+    树中每个分支声称的子信念必须等于：在父信念的各当前位置上执行该命令、
+    只保留拿到该回执的候选、并把位置各自推进后的结果。任何关联错位都会暴露。
+    返回 (叶子初态列表, 命令节点数)。
+    """
+    transitions = spec.transitions
+    leaves = []
+    cmd_nodes = 0
+
+    def expected_pairs(pairs, command, response):
+        out = []
+        for initial, current in pairs:
+            nxt, resp = transitions[(current, command)]
+            if resp == response:
+                out.append([initial, nxt])
+        return sorted(out)
+
+    def walk(node, expected_node_pairs):
+        assert sorted(map(list, node["pairs"])) == expected_node_pairs, (
+            f"节点信念无法由此前回执连续复算："
+            f"树中 {node['pairs']} != 复算 {expected_node_pairs}"
+        )
+        if node["type"] == "resolved":
+            assert len(node["pairs"]) == 1
+            assert node["initial"] == node["pairs"][0][0]
+            leaves.append(node["initial"])
+            return
+        if node["type"] == "ambiguous_ref":
+            return
+        nonlocal cmd_nodes
+        if node["type"] == "command":
+            cmd_nodes += 1
+            groups = node["branches"]
+            for br in groups:
+                child_pairs = expected_pairs(node["pairs"],
+                                             node["command"], br["response"])
+                assert child_pairs, f"回执 {br['response']} 分支为空"
+                assert sorted(map(list, br["pairs"])) == child_pairs
+                walk(br["node"], child_pairs)
+            # 同一命令下所有分支的回执必须互不相同且覆盖全部候选。
+            assert len({b["response"] for b in groups}) == len(groups)
+            covered = sum(len(b["pairs"]) for b in groups)
+            assert covered == len(node["pairs"])
+            return
+        # ambiguous：逐命令展示全部分支。
+        assert node["type"] == "ambiguous"
+        for bc in node["branches"]:
+            for br in bc["responses"]:
+                child_pairs = expected_pairs(node["pairs"],
+                                             bc["command"], br["response"])
+                assert child_pairs
+                assert sorted(map(list, br["pairs"])) == child_pairs
+                walk(br["node"], child_pairs)
+
+    root_pairs = sorted([c, c] for c in spec.candidates)
+    walk(result["tree"], root_pairs)
+    return sorted(leaves), cmd_nodes
+
+
+class TestTreeReplayInvariant(unittest.TestCase):
+    """所有规程的策略树都必须能逐分支连续复算（关联永不被对调或合并）。"""
+
+    def _specs(self):
+        abcde = TestMultiCommonReceiptAssociation()
+        yield build_spec(abcde.scenario())
+        yield make(
+            ["S0", "S1"], ["a"],
+            {"S0": {"a": ("S0", "X")}, "S1": {"a": ("S1", "Y")}},
+        )
+        yield make(
+            ["S0", "S1"], ["a"],
+            {"S0": {"a": ("S0", "R")}, "S1": {"a": ("S0", "R")}},
+        )
+        yield make(
+            ["P", "Q", "X"], ["a", "b"],
+            {
+                "P": {"a": ("X", "r"), "b": ("X", "s")},
+                "Q": {"a": ("Q", "r"), "b": ("Q", "s")},
+                "X": {"a": ("X", "r"), "b": ("X", "lo")},
+            },
+            candidates=["P", "Q"],
+        )
+
+    def test_every_branch_recomputable_and_leaves_partition_candidates(self):
+        for spec in self._specs():
+            result = analyze(spec)
+            leaves, cmd_nodes = _replay_tree(spec, result)
+            # 可辨规程：每个候选初态恰好成为一个叶子。
+            if result["status"] == "distinguishable":
+                self.assertEqual(leaves, sorted(spec.candidates))
+                self.assertGreaterEqual(cmd_nodes, 1)
+            else:
+                # 不可辨规程中不存在命令节点（根即 ambiguous）。
+                self.assertEqual(cmd_nodes, 0)
+
+
 class TestCancellation(unittest.TestCase):
     def test_pre_cancelled(self):
         spec = make(

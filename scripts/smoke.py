@@ -3,7 +3,9 @@
 覆盖：
 * /healthz 与首页可达；
 * 一层分辨树：两个初态在同一命令下得到不同响应 → 深度 1、按响应分支收敛；
-* 不可辨信念：同响应汇流 → indistinguishable 且给出不可辨信念。
+* 不可辨信念：同响应汇流 → indistinguishable 且给出不可辨信念；
+* 多路共同回执（五候选 A-E）：规范首命令 b，共同回执分支内
+  候选初态与中继位置的关联必须正确，后续 z 回执归属随之正确。
 
 成功退出码 0，任一断言失败退出码 1。
 """
@@ -82,6 +84,60 @@ INDISTINGUISHABLE = {
     },
 }
 
+# 五候选 A-E + 中继 X/Y/Z/U/V，命令 a/b/c/z。
+# b：A、B、C 同一回执 r 但分别进入 Y、X、Z；D、E 立即得 d、e。
+# a：A、B、C 同回执 r 进入 X、Y、Z；D、E 同回执 s 进入 U、V（需额外两步）。
+# z：X/Y/Z 回 x/y/z，可一步分辨 {A,B,C}。c：ABC 汇流，不可取。
+# 规范首命令必须是 b（唯一最坏两步），且共同回执分支关联必须是
+# {A→Y, B→X, C→Z}，随后 z 的 y 定 A、x 定 B、z 定 C。
+MULTI_COMMON = {
+    "states": ["A", "B", "C", "D", "E", "X", "Y", "Z", "U", "V"],
+    "commands": ["a", "b", "c", "z"],
+    "candidates": ["A", "B", "C", "D", "E"],
+    "transitions": {
+        "A": {"a": {"next": "X", "response": "r"},
+              "b": {"next": "Y", "response": "r"},
+              "c": {"next": "A", "response": "p"},
+              "z": {"next": "A", "response": "p"}},
+        "B": {"a": {"next": "Y", "response": "r"},
+              "b": {"next": "X", "response": "r"},
+              "c": {"next": "A", "response": "p"},
+              "z": {"next": "B", "response": "p"}},
+        "C": {"a": {"next": "Z", "response": "r"},
+              "b": {"next": "Z", "response": "r"},
+              "c": {"next": "A", "response": "p"},
+              "z": {"next": "C", "response": "p"}},
+        "D": {"a": {"next": "U", "response": "s"},
+              "b": {"next": "D", "response": "d"},
+              "c": {"next": "D", "response": "t"},
+              "z": {"next": "D", "response": "t"}},
+        "E": {"a": {"next": "V", "response": "s"},
+              "b": {"next": "E", "response": "e"},
+              "c": {"next": "E", "response": "t"},
+              "z": {"next": "E", "response": "t"}},
+        "X": {"a": {"next": "X", "response": "r"},
+              "b": {"next": "X", "response": "r"},
+              "c": {"next": "X", "response": "r"},
+              "z": {"next": "X", "response": "x"}},
+        "Y": {"a": {"next": "Y", "response": "r"},
+              "b": {"next": "Y", "response": "r"},
+              "c": {"next": "Y", "response": "r"},
+              "z": {"next": "Y", "response": "y"}},
+        "Z": {"a": {"next": "Z", "response": "r"},
+              "b": {"next": "Z", "response": "r"},
+              "c": {"next": "Z", "response": "r"},
+              "z": {"next": "Z", "response": "z"}},
+        "U": {"a": {"next": "U", "response": "g"},
+              "b": {"next": "U", "response": "g"},
+              "c": {"next": "U", "response": "g"},
+              "z": {"next": "X", "response": "w"}},
+        "V": {"a": {"next": "V", "response": "g"},
+              "b": {"next": "V", "response": "g"},
+              "c": {"next": "V", "response": "g"},
+              "z": {"next": "Y", "response": "w"}},
+    },
+}
+
 
 def main():
     if not wait_for(WEB_URL + "/healthz"):
@@ -118,6 +174,45 @@ def main():
     assert amb["type"] == "ambiguous"
     assert amb["branches"][0]["command"] == "a"
 
+    # 多路共同回执：规范首命令 b，共同回执分支关联必须正确、可连续复算。
+    r3 = check(MULTI_COMMON, "smoke-multi-common")
+    assert r3["status"] == "distinguishable", r3["status"]
+    assert r3["worst_case_depth"] == 2, r3["worst_case_depth"]
+    root = r3["tree"]
+    assert root["type"] == "command" and root["command"] == "b", \
+        f"规范首命令应为 b，实为 {root.get('command')}"
+    by_resp = {b["response"]: b for b in root["branches"]}
+    assert [b["response"] for b in root["branches"]] == ["d", "e", "r"]
+    # D、E 由不同回执立即确定。
+    assert by_resp["d"]["node"]["initial"] == "D"
+    assert by_resp["e"]["node"]["initial"] == "E"
+    # 共同回执 r：A→Y、B→X、C→Z（A/B 位置绝不能对调）。
+    shared = by_resp["r"]
+    assert sorted(tuple(p) for p in shared["pairs"]) == [
+        ("A", "Y"), ("B", "X"), ("C", "Z")], shared["pairs"]
+    inner = shared["node"]
+    assert inner["type"] == "command" and inner["command"] == "z"
+    # 后续 z 回执归属：x 定 B、y 定 A、z 定 C。
+    assert [(x["response"], x["node"]["initial"],
+             [tuple(p) for p in x["pairs"]]) for x in inner["branches"]] == [
+        ("x", "B", [("B", "X")]),
+        ("y", "A", [("A", "Y")]),
+        ("z", "C", [("C", "Z")]),
+    ], inner["branches"]
+    # 五个候选各成为恰好一个叶子。
+    leaves = []
+
+    def collect(node):
+        if node["type"] == "resolved":
+            leaves.append(node["initial"])
+        for bch in node.get("branches", []):
+            collect(bch.get("node", {}))
+            for rsp in bch.get("responses", []):
+                collect(rsp.get("node", {}))
+
+    collect(root)
+    assert sorted(leaves) == ["A", "B", "C", "D", "E"], leaves
+
     # 陈旧草稿防护：409 且不返回结果。
     _, sub = request("POST", "/api/check",
                      {"draft_id": "smoke-stale", "spec": DEPTH_ONE})
@@ -126,7 +221,8 @@ def main():
     assert code == 409 and polled.get("stale") is True
     assert "result" not in polled
 
-    print("HTTP 冒烟全部通过：健康检查 / 首页 / 一层分辨树 / 不可辨信念 / 陈旧草稿防护")
+    print("HTTP 冒烟全部通过：健康检查 / 首页 / 一层分辨树 / 不可辨信念 / "
+          "多路共同回执关联 / 陈旧草稿防护")
     return 0
 
 
