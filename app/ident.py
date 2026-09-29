@@ -144,15 +144,6 @@ def build_spec(payload: dict) -> Spec:
 Belief = tuple[tuple[str, str], ...]
 
 
-def _position_projection(belief: Belief) -> tuple[str, ...] | None:
-    if len(belief) < 3:
-        return None
-    positions = tuple(sorted(current for _, current in belief))
-    if len(set(positions)) != len(positions):
-        return None
-    return positions
-
-
 def _split(spec: Spec, belief: Belief, command: str) -> list[tuple[str, Belief]]:
     """按响应分支：返回 [(响应, 子信念)]，响应按 ASCII 序。"""
     groups: dict[str, list[tuple[str, str]]] = {}
@@ -186,10 +177,6 @@ def _enumerate(spec: Spec, is_cancelled: Callable[[], bool]) -> _Graph:
     index = {root: 0}
     order = [root]
     edges: dict[Belief, dict[str, list[tuple[str, Belief]]]] = {}
-    projected: dict[tuple[str, ...], Belief] = {}
-    root_projection = _position_projection(root)
-    if root_projection is not None:
-        projected[root_projection] = root
     queue = deque([root])
     ticks = 0
 
@@ -200,10 +187,9 @@ def _enumerate(spec: Spec, is_cancelled: Callable[[], bool]) -> _Graph:
             branches = _split(spec, belief, cmd)
             resolved_branches: list[tuple[str, Belief]] = []
             for response, child in branches:
-                projection = _position_projection(child)
-                existing = projected.get(projection) if projection is not None else None
-                if existing is not None:
-                    child = existing
+                # 信念同一性必须是完整的“候选初态 -> 当前位置”关联：
+                # 两个关联即使当前位置集合相同（例如 {A→X,B→Y} 与 {A→Y,B→X}），
+                # 后续命令的回执归属也可能完全不同，绝不能按位置投影合并。
                 if child not in index:
                     if len(index) >= BELIEF_LIMIT:
                         raise AnalysisLimit(
@@ -212,8 +198,6 @@ def _enumerate(spec: Spec, is_cancelled: Callable[[], bool]) -> _Graph:
                     index[child] = len(order)
                     order.append(child)
                     queue.append(child)
-                    if projection is not None:
-                        projected[projection] = child
                 resolved_branches.append((response, child))
             cmd_map[cmd] = resolved_branches
         edges[belief] = cmd_map

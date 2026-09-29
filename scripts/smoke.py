@@ -82,6 +82,57 @@ INDISTINGUISHABLE = {
     },
 }
 
+# 阀组复核：五个候选初态 A–E，命令 a/b/c/z，含中继 X/Y/Z/U/V。
+# b 对 A/B/C 同一回执 s 却分别转入 Y/X/Z；D/E 立即拿到不同回执 d/e。
+# 首命令必须是 b（最短最坏两步），共同回执支的关联不能与 a 路线对调。
+VALVE = {
+    "states": ["A", "B", "C", "D", "E", "X", "Y", "Z", "U", "V"],
+    "commands": ["a", "b", "c", "z"],
+    "candidates": ["A", "B", "C", "D", "E"],
+    "transitions": {
+        "A": {"a": {"next": "X", "response": "s"},
+              "b": {"next": "Y", "response": "s"},
+              "c": {"next": "A", "response": "g"},
+              "z": {"next": "A", "response": "g"}},
+        "B": {"a": {"next": "Y", "response": "s"},
+              "b": {"next": "X", "response": "s"},
+              "c": {"next": "B", "response": "g"},
+              "z": {"next": "B", "response": "g"}},
+        "C": {"a": {"next": "Z", "response": "s"},
+              "b": {"next": "Z", "response": "s"},
+              "c": {"next": "C", "response": "g"},
+              "z": {"next": "C", "response": "g"}},
+        "D": {"a": {"next": "U", "response": "k"},
+              "b": {"next": "D", "response": "d"},
+              "c": {"next": "D", "response": "g"},
+              "z": {"next": "D", "response": "g"}},
+        "E": {"a": {"next": "V", "response": "k"},
+              "b": {"next": "E", "response": "e"},
+              "c": {"next": "E", "response": "g"},
+              "z": {"next": "E", "response": "g"}},
+        "X": {"a": {"next": "X", "response": "p"},
+              "b": {"next": "X", "response": "p"},
+              "c": {"next": "X", "response": "p"},
+              "z": {"next": "X", "response": "x"}},
+        "Y": {"a": {"next": "Y", "response": "p"},
+              "b": {"next": "Y", "response": "p"},
+              "c": {"next": "Y", "response": "p"},
+              "z": {"next": "Y", "response": "y"}},
+        "Z": {"a": {"next": "Z", "response": "p"},
+              "b": {"next": "Z", "response": "p"},
+              "c": {"next": "Z", "response": "p"},
+              "z": {"next": "Z", "response": "z"}},
+        "U": {"a": {"next": "U", "response": "m"},
+              "b": {"next": "U", "response": "m"},
+              "c": {"next": "X", "response": "m"},
+              "z": {"next": "U", "response": "m"}},
+        "V": {"a": {"next": "V", "response": "m"},
+              "b": {"next": "V", "response": "m"},
+              "c": {"next": "Y", "response": "m"},
+              "z": {"next": "V", "response": "m"}},
+    },
+}
+
 
 def main():
     if not wait_for(WEB_URL + "/healthz"):
@@ -118,6 +169,30 @@ def main():
     assert amb["type"] == "ambiguous"
     assert amb["branches"][0]["command"] == "a"
 
+    # 多路共同回执：b 共同回执分支的完整关联与后续 z 回执归属。
+    r3 = check(VALVE, "smoke-valve")
+    assert r3["status"] == "distinguishable", r3["status"]
+    assert r3["worst_case_depth"] == 2, r3["worst_case_depth"]
+    root3 = r3["tree"]
+    assert root3["type"] == "command" and root3["command"] == "b", "规范首命令应为 b"
+    b_branches = root3["branches"]
+    # 响应分支按 ASCII 序：d < e < s。
+    assert [b["response"] for b in b_branches] == ["d", "e", "s"]
+    by_resp = {b["response"]: b for b in b_branches}
+    assert by_resp["d"]["node"]["initial"] == "D"
+    assert by_resp["e"]["node"]["initial"] == "E"
+    s_branch = by_resp["s"]
+    # b 后实际位置：A→Y、B→X、C→Z（曾被错误对调成 A→X、B→Y）。
+    assert sorted(tuple(p) for p in s_branch["pairs"]) == [
+        ("A", "Y"), ("B", "X"), ("C", "Z")
+    ], s_branch["pairs"]
+    inner = s_branch["node"]
+    assert inner["type"] == "command" and inner["command"] == "z"
+    # 因此 y 确定 A、x 确定 B、z 确定 C。
+    assert [(x["response"], x["node"]["initial"]) for x in inner["branches"]] == [
+        ("x", "B"), ("y", "A"), ("z", "C")
+    ], inner["branches"]
+
     # 陈旧草稿防护：409 且不返回结果。
     _, sub = request("POST", "/api/check",
                      {"draft_id": "smoke-stale", "spec": DEPTH_ONE})
@@ -126,7 +201,8 @@ def main():
     assert code == 409 and polled.get("stale") is True
     assert "result" not in polled
 
-    print("HTTP 冒烟全部通过：健康检查 / 首页 / 一层分辨树 / 不可辨信念 / 陈旧草稿防护")
+    print("HTTP 冒烟全部通过：健康检查 / 首页 / 一层分辨树 / 多路共同回执关联 / "
+          "不可辨信念 / 陈旧草稿防护")
     return 0
 
 

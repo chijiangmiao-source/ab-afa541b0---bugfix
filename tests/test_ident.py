@@ -287,6 +287,165 @@ class TestDepthTwoOptimal(unittest.TestCase):
         )
 
 
+VALVE_ROWS = {
+    # b：A、B、C 同回执 s，但分别转入 Y、X、Z；D/E 立即各自回执。
+    "A": {"a": ("X", "s"), "b": ("Y", "s"), "c": ("A", "g"), "z": ("A", "g")},
+    "B": {"a": ("Y", "s"), "b": ("X", "s"), "c": ("B", "g"), "z": ("B", "g")},
+    "C": {"a": ("Z", "s"), "b": ("Z", "s"), "c": ("C", "g"), "z": ("C", "g")},
+    "D": {"a": ("U", "k"), "b": ("D", "d"), "c": ("D", "g"), "z": ("D", "g")},
+    "E": {"a": ("V", "k"), "b": ("E", "e"), "c": ("E", "g"), "z": ("E", "g")},
+    # z：区分中继 X/Y/Z。
+    "X": {"a": ("X", "p"), "b": ("X", "p"), "c": ("X", "p"), "z": ("X", "x")},
+    "Y": {"a": ("Y", "p"), "b": ("Y", "p"), "c": ("Y", "p"), "z": ("Y", "y")},
+    "Z": {"a": ("Z", "p"), "b": ("Z", "p"), "c": ("Z", "p"), "z": ("Z", "z")},
+    # a 把 D/E 送入 U、V；c 再同回执带到 X、Y；z 才分开（额外两步）。
+    "U": {"a": ("U", "m"), "b": ("U", "m"), "c": ("X", "m"), "z": ("U", "m")},
+    "V": {"a": ("V", "m"), "b": ("V", "m"), "c": ("Y", "m"), "z": ("V", "m")},
+}
+
+
+def valve_payload(state_order, command_order, commands=None):
+    commands = commands if commands is not None else command_order
+    return {
+        "states": state_order,
+        "commands": commands,
+        "candidates": ["A", "B", "C", "D", "E"],
+        "transitions": {
+            s: {c: {"next": VALVE_ROWS[s][c][0], "response": VALVE_ROWS[s][c][1]}
+               for c in command_order}
+            for s in state_order
+        },
+    }
+
+
+def valve_summary(res):
+    """规范树的规范化摘要：首命令、响应分支顺序、各叶子初态归属与信念关联。"""
+    root = res["tree"]
+    summary = [res["status"], res["worst_case_depth"], root["command"],
+               [b["response"] for b in root["branches"]]]
+    for br in root["branches"]:
+        node = br["node"]
+        if node["type"] == "resolved":
+            summary.append((br["response"], node["initial"]))
+        else:
+            summary.append((
+                br["response"],
+                sorted(tuple(p) for p in br["pairs"]),
+                node.get("command"),
+                sorted((x["response"], x["node"].get("initial"))
+                       for x in node.get("branches", [])),
+            ))
+    return summary
+
+
+class TestValveCommonReceiptAssociation(unittest.TestCase):
+    """阀组复核：b 的共同回执分支必须保留各初态到中继位置的关联。"""
+
+    def test_b_branch_associations_and_z_receipts(self):
+        res = analyze_payload(valve_payload(
+            ["A", "B", "C", "D", "E", "X", "Y", "Z", "U", "V"],
+            ["a", "b", "c", "z"],
+        ))
+        self.assertEqual(res["status"], "distinguishable")
+        self.assertEqual(res["worst_case_depth"], 2)
+        root = res["tree"]
+        self.assertEqual(root["command"], "b")
+        # 响应分支按 ASCII 序：d < e < s。
+        by = {b["response"]: b for b in root["branches"]}
+        self.assertEqual(list(by), ["d", "e", "s"])
+        # D、E 立即分辨。
+        self.assertEqual(by["d"]["node"]["initial"], "D")
+        self.assertEqual(by["e"]["node"]["initial"], "E")
+        # 共同回执 s：b 后 A 在 Y、B 在 X、C 在 Z（不是 a 的 X、Y、Z）。
+        s_branch = by["s"]
+        self.assertEqual(
+            sorted(tuple(p) for p in s_branch["pairs"]),
+            [("A", "Y"), ("B", "X"), ("C", "Z")],
+        )
+        # 再发 z：y 才确定 A、x 才确定 B、z 确定 C。
+        inner = s_branch["node"]
+        self.assertEqual(inner["type"], "command")
+        self.assertEqual(inner["command"], "z")
+        self.assertEqual(
+            [(x["response"], x["node"]["initial"]) for x in inner["branches"]],
+            [("x", "B"), ("y", "A"), ("z", "C")],
+        )
+
+    def test_tree_replayable_branch_by_branch(self):
+        """树中每个分支都能按该分支此前的回执，用同一台机器连续复算到叶子。"""
+        spec = build_spec(valve_payload(
+            ["A", "B", "C", "D", "E", "X", "Y", "Z", "U", "V"],
+            ["a", "b", "c", "z"],
+        ))
+        res = analyze(spec)
+
+        def replay(node, receipt_path, positions):
+            # positions: 沿 receipt_path 与命令序列后，各候选初态的当前位置。
+            if node["type"] == "resolved":
+                self.assertEqual(set(positions), {node["initial"]})
+                self.assertEqual([p[0] for p in node["pairs"]], [node["initial"]])
+                return
+            cmd = node["command"]
+            for br in node["branches"]:
+                expected = {}
+                for initial, current in positions.items():
+                    nxt, response = spec.step(current, cmd)
+                    if response == br["response"]:
+                        expected[initial] = nxt
+                got = {initial: cur for initial, cur in br["pairs"]}
+                self.assertEqual(got, expected,
+                                 f"路径 {receipt_path + (br['response'],)} 关联复算不符")
+                self.assertTrue(expected, "空响应分支不应出现")
+                replay(br["node"], receipt_path + (br["response"],), expected)
+
+        replay(res["tree"], (), {c: c for c in spec.candidates})
+
+    def test_stable_across_entry_permutations(self):
+        """状态、命令、转移录入顺序变化时，规范树摘要必须完全一致。"""
+        orderings = [
+            (list("ABCDEXYZUV"), ["a", "b", "c", "z"]),
+            (list("VUZYXEDCBA"), ["z", "c", "b", "a"]),
+            (["D", "E", "X", "Y", "Z", "U", "V", "A", "B", "C"],
+             ["c", "z", "a", "b"]),
+        ]
+        ref = None
+        for state_order, command_order in orderings:
+            res = analyze_payload(valve_payload(state_order, command_order))
+            summary = valve_summary(res)
+            if ref is None:
+                ref = summary
+            else:
+                self.assertEqual(summary, ref)
+
+    def test_a_route_requires_two_more_steps_for_d_e(self):
+        """去掉 b 后：a 把 D/E 送入 U/V，需 c 再 z 两步才能分辨 → 真深度 3。"""
+        res = analyze_payload(valve_payload(
+            list("VUZYXEDCBA"), ["z", "c", "a"], commands=["a", "c", "z"],
+        ))
+        self.assertEqual(res["status"], "distinguishable")
+        self.assertEqual(res["worst_case_depth"], 3)
+        root = res["tree"]
+        self.assertEqual(root["command"], "a")
+        by = {b["response"]: b for b in root["branches"]}
+        # k 支：{D→U, E→V} 同回执，仍含两个候选。
+        k = by["k"]
+        self.assertEqual(
+            sorted(tuple(p) for p in k["pairs"]), [("D", "U"), ("E", "V")]
+        )
+        c_node = k["node"]
+        self.assertEqual(c_node["command"], "c")
+        m = {x["response"]: x for x in c_node["branches"]}["m"]
+        self.assertEqual(
+            sorted(tuple(p) for p in m["pairs"]), [("D", "X"), ("E", "Y")]
+        )
+        z_node = m["node"]
+        self.assertEqual(z_node["command"], "z")
+        self.assertEqual(
+            [(x["response"], x["node"]["initial"]) for x in z_node["branches"]],
+            [("x", "D"), ("y", "E")],
+        )
+
+
 class TestStableTieBreaking(unittest.TestCase):
     def test_command_ascii_tiebreak(self):
         # 命令 b 和 a 都能一步分辨；规范树必须选 ASCII 较小的 a。
