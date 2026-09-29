@@ -1,0 +1,37 @@
+# Compose：web 长期运行；verify 为一次性校验服务（测试 + 构建检查 + HTTP 冒烟），
+# 完成后退出并以退出码报告：
+#   docker compose up web            # 启动页面
+#   docker compose run --rm verify   # 运行完整校验（0 = 通过）
+#   docker compose up --build verify # 或直接跑，结束自动退出
+# 端口可配置：WEB_PORT=9000 docker compose up web
+
+services:
+  web:
+    build: .
+    image: valve-ident:latest
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      QUIET: "1"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import json,urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3); sys.exit(0 if json.load(r).get('ok') else 1)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  verify:
+    image: valve-ident:latest
+    build: .
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      WEB_URL: "http://web:8000"
+      QUIET: "1"
+    command: ["sh", "scripts/verify.sh"]
+    restart: "no"

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>深海阀组控制器 · 初态自适应辨识复核</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>深海阀组控制器 · 初态自适应辨识复核</h1>
+  <p class="sub">
+    录入 2–10 个状态、候选初态、至多 6 个命令，以及每个状态—命令对唯一的下一状态与 ASCII 响应；
+    复核一组命令能否借助每次回执自适应辨识唯一初态，并给出最短最坏步数辨识树。
+  </p>
+</header>
+
+<main>
+<section class="card">
+  <h2>1. 状态 <span class="hint">（2–10 个，可打印 ASCII）</span></h2>
+  <div id="states" class="chip-editor"></div>
+  <button type="button" id="add-state" class="btn small">+ 添加状态</button>
+</section>
+
+<section class="card">
+  <h2>2. 命令 <span class="hint">（1–6 个，可打印 ASCII）</span></h2>
+  <div id="commands" class="chip-editor"></div>
+  <button type="button" id="add-command" class="btn small">+ 添加命令</button>
+</section>
+
+<section class="card">
+  <h2>3. 候选初态</h2>
+  <div id="candidates" class="checks"></div>
+</section>
+
+<section class="card">
+  <h2>4. 转移与回执表 <span class="hint">（每个状态—命令对唯一）</span></h2>
+  <div class="table-wrap">
+    <table id="matrix">
+      <thead></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="row">
+    <button type="button" id="fill-self" class="btn small">自环 + 回执 “OK” 填充空缺</button>
+  </div>
+</section>
+
+<section class="card">
+  <h2>5. 复核</h2>
+  <div class="row">
+    <button type="button" id="submit" class="btn primary">开始复核</button>
+    <button type="button" id="cancel" class="btn danger" hidden>取消</button>
+    <span id="job-status" class="job-status"></span>
+  </div>
+  <div id="form-error" class="error" hidden></div>
+  <div id="stale-banner" class="banner warn" hidden></div>
+</section>
+
+<section id="result-card" class="card" hidden>
+  <h2>复核结论与规范辨识树</h2>
+  <div id="result-summary"></div>
+  <div id="tree"></div>
+  <details id="belief-explorer">
+    <summary>全部可达信念状态</summary>
+    <div id="belief-list"></div>
+  </details>
+</section>
+</main>
+
+<footer>
+  信念状态保留“候选初态 → 命令后当前位置”关联，按响应分支分组；策略在最短最坏步数下
+  按命令 ASCII 序、响应分支序稳定裁决。
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
